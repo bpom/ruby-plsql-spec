@@ -1,5 +1,3 @@
-require 'spec_helper'
-
 # load 'award_bonus' procedure into the database
 require 'award_bonus'
 
@@ -16,7 +14,7 @@ describe "Award bonus" do
         :salary => salary
       )
       plsql.award_bonus(employee[:employee_id], sales_amt)
-      get_employee(employee[:employee_id])[:salary].should == result
+      expect(get_employee(employee[:employee_id])[:salary]).to eq result
     end
   end
 

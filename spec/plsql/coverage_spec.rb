@@ -11,13 +11,19 @@ describe "Coverage" do
     PLSQL::Coverage.reset_cache
 
     plsql.connect! CONNECTION_PARAMS
+    plsql.execute "ALTER SESSION SET PLSQL_OPTIMIZE_LEVEL=1"
     drop_profiler_tables
     @source = <<-SQL
 CREATE OR REPLACE FUNCTION test_profiler RETURN VARCHAR2 IS
+
+-- A comment before executed code
 BEGIN
   RETURN 'test_profiler';
+  -- A dummy empty line follows
+
 EXCEPTION
   WHEN OTHERS THEN
+    -- We should never reach here
     RETURN 'others';
 END;
     SQL
@@ -26,10 +32,15 @@ END;
     @coverage_data = {
       DATABASE_USER.upcase => {
         "TEST_PROFILER" => {
-          1=>0,
-          3=>1,
-          6=>0,
-          7=>1
+          "FUNCTION" => {
+            1=>1,
+            4=>1,
+            5=>1,
+            8=>0,
+            9=>0,
+            11=>0,
+            12=>1
+          }
         }
       }
     }
@@ -49,17 +60,17 @@ END;
     end
 
     it "should start coverage collection" do
-      @start_result.should be_true
+      expect(@start_result).to be_truthy
     end
 
     it "should create profiler tables" do
       %w(plsql_profiler_data plsql_profiler_units plsql_profiler_runs).each do |table_name|
-        plsql.send(table_name).should be_a(PLSQL::Table)
+        expect(plsql.send(table_name)).to be_a(PLSQL::Table)
       end
     end
 
     it "should start collecting profiler data" do
-      plsql.plsql_profiler_runs.all.should_not be_empty
+      expect(plsql.plsql_profiler_runs.all).not_to be_empty
     end
 
   end
@@ -72,11 +83,11 @@ END;
     end
 
     it "should stop coverage collection" do
-      @stop_result.should be_true
+      expect(@stop_result).to be_truthy
     end
 
     it "should populate profiler data table" do
-      plsql.plsql_profiler_data.all.should_not be_empty
+      expect(plsql.plsql_profiler_data.all).not_to be_empty
     end
 
   end
@@ -89,55 +100,112 @@ END;
     end
 
     it "should drop profiler tables" do
-      PLSQL::Coverage.cleanup.should be_true
+      expect(PLSQL::Coverage.cleanup).to be_truthy
       %w(plsql_profiler_data plsql_profiler_units plsql_profiler_runs).each do |table_name|
-        PLSQL::Table.find(plsql, table_name.to_sym).should be_nil
+        expect(PLSQL::Table.find(plsql, table_name.to_sym)).to be_nil
       end
     end
 
     it "should delete profiler table data when profiler tables already were present" do
       # simulate that profiler tables were already present
       PLSQL::Coverage.reset_cache
-      lambda {
+      expect {
         PLSQL::Coverage.start
         plsql.test_profiler
         PLSQL::Coverage.stop
         PLSQL::Coverage.cleanup
-      }.should_not change {
+      }.not_to change {
         [plsql.plsql_profiler_data.all, plsql.plsql_profiler_units.all, plsql.plsql_profiler_runs.all]
       }
     end
   end
 
   describe "get coverage data" do
-    before(:all) do
-      PLSQL::Coverage.start
-      plsql.test_profiler
-      PLSQL::Coverage.stop
+
+    context "when a PLSQL function is run" do
+      before(:all) do
+        PLSQL::Coverage.start
+        plsql.test_profiler
+        PLSQL::Coverage.stop
+      end
+
+      it "should get profiler run results" do
+        expect(PLSQL::Coverage.find.coverage_data).to eq(@coverage_data)
+      end
+
+      it "should not get ignored schemas" do
+        expect(PLSQL::Coverage.find.coverage_data(:ignore_schemas => [DATABASE_USER])).to be_empty
+      end
+
+      it "should get only objects with like condition" do
+        expect(PLSQL::Coverage.find.coverage_data(:like => "#{DATABASE_USER}.test%")).to eq(@coverage_data)
+      end
+
+      it "should not get objects not matching like condition" do
+        expect(PLSQL::Coverage.find.coverage_data(:like => "#{DATABASE_USER}.none%")).to be_empty
+      end
     end
 
-    it "should get profiler run results" do
-      PLSQL::Coverage.find.coverage_data.should == @coverage_data
-    end
+    context "when a PLSQL PACKAGE is run" do
+      before(:all) do
+        @package = <<-SQL
+          CREATE OR REPLACE PACKAGE mailman_package AS
+            VAR_TEST CONSTANT NUMBER := 12345;
+            PROCEDURE TEST_PROC;
+          END;
+        SQL
 
-    it "should not get ignored schemas" do
-      PLSQL::Coverage.find.coverage_data(:ignore_schemas => [DATABASE_USER]).should be_empty
-    end
+        @package_body = <<-SQL
+          CREATE OR REPLACE PACKAGE BODY mailman_package AS
+            PROCEDURE TEST_PROC AS
+            BEGIN
+              EXECUTE IMMEDIATE 'SELECT 1 AS TEST FROM DUAL';
+            END;
+          END;
+        SQL
 
-    it "should get only objects with like condition" do
-      PLSQL::Coverage.find.coverage_data(:like => "#{DATABASE_USER}.test%").should == @coverage_data
-    end
+        plsql.execute @package
+        plsql.execute @package_body
 
-    it "should not get objects not matching like condition" do
-      PLSQL::Coverage.find.coverage_data(:like => "#{DATABASE_USER}.none%").should be_empty
+        @package_coverage = {
+          DATABASE_USER.upcase => {
+            "MAILMAN_PACKAGE" => {
+              "PACKAGE SPEC" => {
+                1=>1,
+                2=>1,
+                4=>1
+              },
+              "PACKAGE BODY" => {
+                2=>1,
+                3=>1,
+                4=>1,
+                5=>1
+              }
+            }
+          }
+        }
+
+        PLSQL::Coverage.start
+        plsql.mailman_package.var_test
+        plsql.mailman_package.test_proc
+        PLSQL::Coverage.stop
+      end
+
+      after(:all) do
+        plsql.execute "DROP PACKAGE mailman_package" rescue nil
+      end
+
+      it "should get mailman_package run results" do
+        expect(PLSQL::Coverage.find.coverage_data).to eq(@package_coverage)
+      end
     end
 
   end
 
   describe "generate" do
     def adjust_test_coverage
-      @test_coverage = @coverage_data[DATABASE_USER.upcase]['TEST_PROFILER'].dup
-      @test_coverage.delete(1) if @test_coverage[1] && @source.split("\n")[0] =~ /^CREATE OR REPLACE (.*)$/
+      @test_coverage = @coverage_data[DATABASE_USER.upcase]['TEST_PROFILER']['FUNCTION'].dup
+      @test_coverage.delete(1) if @test_coverage[1] == 0 && @source.split("\n")[0] =~ /^CREATE OR REPLACE (.*)$/
     end
 
     def expected_coverages
@@ -176,26 +244,29 @@ END;
 
           # line should be present
           a = @details_doc.at_css("table.details a[name=\"line#{i+1}\"]")
-          a.should_not be_nil
+          expect(a).not_to be_nil
+
+          doc_line = a.parent.children[1]
+          doc_line_text = doc_line ? doc_line.text : ""
 
           # source text should be present
-          a.parent.children[1].text.should == line
+          expect(doc_line_text).to eq(line)
 
           # table row should have correct class according to coverage data
           tr = a.ancestors('tr')[0]
-          tr.attr('class').should == case @test_coverage[i+1]
+          expect(tr.attr('class')).to eq(case @test_coverage[i+1]
             when nil
               'inferred'
             when 0
               'uncovered'
             else
               'marked'
-            end
+            end)
         end
       end
 
       it "should generate HTML table with coverage percentage" do
-        @details_doc.css("table.report div.percent_graph_legend").map{|div| div.text}.should == expected_coverages
+        expect(@details_doc.css("table.report div.percent_graph_legend").map{|div| div.text}).to eq(expected_coverages)
       end
 
     end
@@ -206,8 +277,8 @@ END;
       end
 
       it "should generate HTML table with coverage percentage" do
-        @index_doc.css("table.report tbody tr:contains('HR.TEST_PROFILER') div.percent_graph_legend").map{|div| div.text}.should == expected_coverages
-        @index_doc.css("table.report tfoot div.percent_graph_legend").map{|div| div.text}.should == expected_coverages
+        expect(@index_doc.css("table.report tbody tr:contains('HR.TEST_PROFILER') div.percent_graph_legend").map{|div| div.text}).to eq(expected_coverages)
+        expect(@index_doc.css("table.report tfoot div.percent_graph_legend").map{|div| div.text}).to eq(expected_coverages)
       end
 
     end
@@ -230,20 +301,20 @@ END;
     end
 
     it "should start collecting profiler data" do
-      plsql(:other).plsql_profiler_runs.all.should_not be_empty
+      expect(plsql(:other).plsql_profiler_runs.all).not_to be_empty
     end
 
     it "should populate profiler data table" do
-      plsql(:other).plsql_profiler_data.all.should_not be_empty
+      expect(plsql(:other).plsql_profiler_data.all).not_to be_empty
     end
 
     it "should get profiler run results" do
-      PLSQL::Coverage.find(:other).coverage_data.should == @coverage_data
+      expect(PLSQL::Coverage.find(:other).coverage_data).to eq(@coverage_data)
     end
 
     it "should generate reports" do
       PLSQL::Coverage.report :other, :directory => File.join(@directory, 'other')
-      File.file?(File.join(@directory, 'other/index.html')).should be_true
+      expect(File.file?(File.join(@directory, 'other/index.html'))).to be_truthy
     end
   end
 

@@ -1,5 +1,7 @@
 require 'thor'
 require 'thor/actions'
+require 'rspec/support'
+RSpec::Support.require_rspec_support 'differ'
 
 # use plsql-spec for showing diff of files
 # by defuault Thor uses diff utility which is not available on Windows
@@ -19,12 +21,9 @@ module PLSQL
 
       desc 'init', 'initialize spec subdirectory with default ruby-plsql-spec files'
       def init
-        empty_directory 'spec'
-        %w(spec_helper.rb database.yml).each do |file|
-          copy_file file, "spec/#{file}"
-        end
-        directory 'helpers', 'spec/helpers'
         empty_directory 'spec/factories'
+        copy_file '.rspec', '.rspec'
+        directory 'spec', 'spec'
         say <<-EOS, :red
 
 Please update spec/database.yml file and specify your database connection parameters.
@@ -102,7 +101,7 @@ EOS
 
       desc 'diff [FILE1] [FILE2]', 'show difference between files'
       def diff(file1, file2)
-        differ = RSpec::Expectations::Differ.new
+        differ = RSpec::Support::Differ.new
         say differ.diff_as_string File.read(file2), File.read(file1)
       end
 
